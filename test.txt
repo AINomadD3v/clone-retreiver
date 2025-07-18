@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[*] Collecting known Instagram clone packages..."
+declare -A pkg_label_map
+
+# Grab all com.instagram.* packages (excluding official one if needed)
+for pkg in $(adb shell pm list packages | grep -i com.instagram.andro | cut -d ':' -f2); do
+  # Use dumpsys to find labelRes, which points to the app's display name
+  label=$(adb shell dumpsys package "$pkg" | grep -oP 'labelRes.*?=\K.*' | head -n 1 || true)
+
+  # Fallback if label is null (some clones don’t expose it)
+  if [[ -z "$label" || "$label" == "null" ]]; then
+    label=$(basename "$pkg")
+  fi
+
+  pkg_label_map["$label"]="$pkg"
+done
+
+echo "[*] Opening launcher and preparing view..."
+adb shell input keyevent 3
+adb shell input swipe 500 1500 500 300 300
+
+for i in {1..5}; do
+  adb shell input swipe 200 1000 800 1000 300
+done
+
+echo "[*] Dumping 4 launcher pages..."
+for i in {1..4}; do
+  adb shell uiautomator dump /sdcard/clonedump$i.xml
+  adb pull /sdcard/clonedump$i.xml >/dev/null
+  adb shell input swipe 800 1000 200 1000 300
+done
+
+echo "[*] Extracting visible Insta clone labels from UI..."
+DUMPS=$(find . -maxdepth 1 -name 'clonedump*.xml')
+
+if [[ -z "$DUMPS" ]]; then
+  echo "❌ No UI dump files found."
+  exit 1
+fi
+
+> seen_labels.txt
+
+for xml in $DUMPS; do
+  awk '
+    /<node/ && /content-desc="Insta[0-9]{4}"/ {
+      match($0, /content-desc="(Insta[0-9]{4})"/, label_arr)
+      if (label_arr[1] != "")
+        print label_arr[1]
+    }
+  ' "$xml" >> seen_labels.txt
+done
+
+sort -u seen_labels.txt -o seen_labels.txt
+
+if [[ ! -s seen_labels.txt ]]; then
+  echo "❌ No Insta labels found in UI dump."
+  exit 0
+fi
+
+echo
+echo "[+] Matched Clones:"
+while read -r label; do
+  match="UNKNOWN"
+  for key in "${!pkg_label_map[@]}"; do
+    if [[ "$label" == *"$key"* || "$key" == *"$label"* ]]; then
+      match="${pkg_label_map[$key]}"
+      break
+    fi
+  done
+  echo "$label → $match"
+done < seen_labels.txt
+
+echo "[*] Cleaning up..."
+rm -f clonedump*.xml seen_labels.txt
+
